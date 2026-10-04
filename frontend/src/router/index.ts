@@ -18,6 +18,9 @@ const Tooling = () => import('@/views/tooling/index.vue')
 const Fire = () => import('@/views/fire/index.vue')
 const Settlement = () => import('@/views/settlement/index.vue')
 const Contract = () => import('@/views/contract/index.vue')
+const Renewal = () => import('@/views/renewal/index.vue')
+const ContractReview = () => import('@/views/contract-review/index.vue')
+const Review = () => import('@/views/review/index.vue')
 const Crew = () => import('@/views/crew/index.vue')
 
 const router = createRouter({
@@ -41,6 +44,9 @@ const router = createRouter({
     { path: '/fire', name: 'fire', component: Fire },
     { path: '/settlement', name: 'settlement', component: Settlement },
     { path: '/contract', name: 'contract', component: Contract },
+    { path: '/renewal', name: 'renewal', component: Renewal },
+    { path: '/contract-review', name: 'contract-review', component: ContractReview },
+    { path: '/review', name: 'review', component: Review },
     { path: '/crew', name: 'crew', component: Crew },
   ],
 })
