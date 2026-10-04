@@ -37,6 +37,7 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>合同对账（持证/在岗）</th>
           <th>当前状态</th>
           <th>可执行动作</th>
         </tr>
@@ -44,6 +45,21 @@
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td>
+            <template v-if="checkOf(Number(row.id))">
+              <div v-if="checkOf(Number(row.id))!.matchedContract" class="subtle">
+                对接：{{ checkOf(Number(row.id))!.matchedContract!['合同编号'] }}
+                · 证书{{ checkOf(Number(row.id))!.certValid ? '有效' : '失效/缺失' }}
+              </div>
+              <span v-if="!checkOf(Number(row.id))!.problems.length" class="ok-text">对得上</span>
+              <span
+                v-for="problem in checkOf(Number(row.id))!.problems"
+                :key="problem"
+                class="problem-text"
+              >⚠ {{ problem }}<br /></span>
+            </template>
+            <span v-else class="subtle">未对接有效合同</span>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
@@ -58,7 +74,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 2" class="empty-state">暂无运维人员数据，可先登记运维人员</td>
+          <td :colspan="columns.length + 3" class="empty-state">暂无运维人员数据，可先登记运维人员</td>
         </tr>
       </tbody>
     </table>
@@ -79,6 +95,8 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/local-service'
+import { listCrewChecks } from '@/api/contract-service'
+import type { CrewCheck } from '@/domain/contract-lifecycle'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('crew')
@@ -91,6 +109,7 @@ const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
+const checksById = ref<Map<number, CrewCheck>>(new Map())
 const filterFields = columns.slice(0, 3)
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
@@ -122,12 +141,17 @@ function runAction(action: string, row: EntryRow) {
   reload()
 }
 
+function checkOf(id: number): CrewCheck | undefined {
+  return checksById.value.get(id)
+}
+
 function reload() {
   errorMessage.value = ''
   try {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    checksById.value = new Map(listCrewChecks().map((check) => [Number(check.crew.id), check]))
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '运维人员列表读取失败'
   }

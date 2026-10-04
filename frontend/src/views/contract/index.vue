@@ -3,11 +3,11 @@
     <header class="page-head">
       <div>
         <h2>运维合同管理</h2>
-        <p class="page-desc">维护运维合同，围绕合同编号、服务范围、合同期限、年度费用做登记、筛选与状态流转。</p>
+        <p class="page-desc">到期与续签结论统一以「合同期限止」为准，合同页、到期提醒、考核页取自同一份判定；历史已终止合同按当时结论留档。</p>
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记运维合同</button>
-        <button class="btn" type="button" @click="exportRows">导出运维合同清单</button>
+        <button class="btn" type="button" @click="exportRows">导出合同清单</button>
       </div>
     </header>
 
@@ -25,9 +25,9 @@
     </p>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label class="filter-item">
+        <span>合同编号 / 服务范围 / 对接人员</span>
+        <input v-model="keyword" placeholder="按关键词检索" />
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -37,34 +37,58 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
-          <th>当前状态</th>
+          <th>持证/在岗对账</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
-          <td>{{ row.status }}</td>
+        <tr v-for="view in rows" :key="String(view.row.id)">
+          <td>{{ view.row['合同编号'] ?? '—' }}</td>
+          <td>{{ view.row['服务范围'] ?? '—' }}</td>
+          <td>{{ view.合同期限 }}</td>
+          <td>{{ formatFee(view.row['年度费用']) }}</td>
+          <td>{{ view.row['考核指标'] ?? '—' }}</td>
+          <td><span :class="assessmentClass(view.verdict.assessment)">{{ view.verdict.assessment }}</span></td>
+          <td>{{ view.row['对接人员'] ?? '—' }}</td>
+          <td>
+            <span class="badge" :class="lifeClass(view.verdict.lifeStatus)">{{ view.verdict.lifeStatus }}</span>
+            <div v-if="!view.verdict.frozen && view.verdict.daysToEnd !== null" class="subtle">
+              {{ view.verdict.daysToEnd >= 0 ? `距到期 ${view.verdict.daysToEnd} 天` : `已过期 ${-view.verdict.daysToEnd} 天` }}
+            </div>
+            <div v-if="view.verdict.frozen" class="subtle">历史终止 · 留档不再重算</div>
+          </td>
+          <td>
+            <span class="badge" :class="renewalClass(view.verdict.renewalState)">{{ view.verdict.renewalState }}</span>
+            <div v-if="Number(view.row['续签次数'] ?? 0) > 0" class="subtle">已续签 {{ view.row['续签次数'] }} 次</div>
+          </td>
+          <td>
+            <span v-if="!view.problems.length" class="ok-text">持证在岗一致</span>
+            <span v-for="problem in view.problems" :key="problem" class="problem-text">⚠ {{ problem }}<br /></span>
+          </td>
           <td class="row-actions">
+            <button v-if="view.verdict.lifeStatus === '待签署'" class="link" type="button" @click="act('sign', view)">确认签署</button>
             <button
-              v-for="action in actions"
-              :key="action"
+              v-if="canRenew(view)"
               class="link"
               type="button"
-              @click="runAction(action, row)"
+              :disabled="view.renewalDuplicate"
+              :title="view.renewalDuplicate ? '续签申请已在待审清单，重复提交只算一次' : ''"
+              @click="act('renew', view)"
             >
-              {{ action }}
+              {{ view.verdict.renewalState === '审核中' ? '续签审核中' : '发起续签' }}
             </button>
+            <button v-if="view.verdict.lifeStatus !== '已终止'" class="link" type="button" @click="act('terminate', view)">终止合同</button>
+            <span v-if="view.verdict.lifeStatus === '已终止'" class="subtle">—</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 2" class="empty-state">暂无运维合同数据，可先登记运维合同</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无符合条件的运维合同</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条运维合同记录</span>
+      <span>共 {{ total }} 份合同 · 续签窗口为到期前 30 天（含已过期未续签）</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -74,63 +98,141 @@
 import { computed, onMounted, ref } from 'vue'
 
 import {
-  downloadEntries,
-  listEntries,
-  moduleMeta,
-  runAction as applyAction,
-} from '@/api/local-service'
-import type { EntryRow } from '@/data/types'
+  exportContractViews,
+  listContractViews,
+  signContract,
+  submitRenewal,
+  terminateContract,
+  type ContractView,
+} from '@/api/contract-service'
+import {
+  LIFE_STATUSES,
+  type ContractLifeStatus,
+  type RenewalState,
+  type AssessmentResult,
+} from '@/domain/contract-lifecycle'
+import { useSessionStore } from '@/stores/session'
 
-const meta = moduleMeta('contract')
-const columns = ["合同编号", "服务范围", "合同期限", "年度费用", "考核指标", "续签状态", "对接人员", "合同状态"]
-const actions = ["确认签署", "发起续签", "终止合同"]
-const statuses = ["待签署", "履行中", "待续签", "已终止"]
-const stats = [{"label": "履行中合同", "value": 0}, {"label": "待续签合同", "value": 0}, {"label": "本年合同金额", "value": 0}]
+const store = useSessionStore()
+const columns = ['合同编号', '服务范围', '合同期限', '年度费用', '考核指标', '考核结果', '对接人员', '到期结论', '续签状态']
 
-const rows = ref<EntryRow[]>([])
-const total = ref(0)
+const all = ref<ContractView[]>([])
+const keyword = ref('')
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+
+const rows = computed(() => {
+  const word = keyword.value.trim()
+  if (!word) {
+    return all.value
+  }
+  return all.value.filter((view) =>
+    [view.row['合同编号'], view.row['服务范围'], view.row['对接人员']]
+      .some((field) => String(field ?? '').includes(word)),
+  )
+})
+const total = computed(() => rows.value.length)
+
+const stats = computed(() => [
+  { label: '履行中合同', value: all.value.filter((v) => v.verdict.lifeStatus === '履行中').length },
+  { label: '待续签/已过期', value: all.value.filter((v) => isRenewal(v.verdict.renewalState, v.verdict.lifeStatus)).length },
+  {
+    label: '本年合同金额（万元）',
+    value: (all.value
+      .filter((v) => v.verdict.lifeStatus === '履行中' || v.verdict.lifeStatus === '待续签')
+      .reduce((sum, v) => sum + Number(v.row['年度费用'] ?? 0), 0) / 10000).toFixed(1),
+  },
+])
+
 const statusSummary = computed(() =>
-  statuses.map((status: string) => ({
+  LIFE_STATUSES.map((status) => ({
     status,
-    count: rows.value.filter((row) => String(row.status) === status).length,
+    count: all.value.filter((view) => view.verdict.lifeStatus === status).length,
   })),
 )
 
+function isRenewal(state: RenewalState, life: ContractLifeStatus): boolean {
+  return life !== '已终止' && (state === '待续签' || state === '审核中')
+}
+
+function canRenew(view: ContractView): boolean {
+  return (
+    view.verdict.lifeStatus !== '待签署' &&
+    view.verdict.lifeStatus !== '已终止' &&
+    view.verdict.renewalState !== '已续签' &&
+    view.verdict.inRenewalWindow
+  )
+}
+
+function lifeClass(status: ContractLifeStatus): string {
+  return {
+    履行中: 'performing',
+    待签署: 'neutral',
+    待续签: 'due',
+    已过期: 'overdue',
+    已终止: 'done',
+  }[status]
+}
+
+function renewalClass(state: RenewalState): string {
+  return {
+    未到续签窗口: 'neutral',
+    待续签: 'due',
+    审核中: 'reviewing',
+    已续签: 'performing',
+    无需续签: 'done',
+  }[state]
+}
+
+function assessmentClass(result: AssessmentResult): string {
+  if (result === '合格') return 'badge pass'
+  if (result === '不合格') return 'badge fail'
+  return 'badge neutral'
+}
+
+function formatFee(value: unknown): string {
+  const amount = Number(value ?? 0)
+  return amount ? `${(amount / 10000).toFixed(2)} 万元` : '—'
+}
+
 function resetFilters() {
-  filters.value = {}
-  reload()
+  keyword.value = ''
 }
 
 function exportRows() {
-  downloadEntries(meta.key)
+  const { filename, content } = exportContractViews()
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
 }
 
 function openCreate() {
   errorMessage.value = '运维合同登记入口尚未接入审批流'
 }
 
-function runAction(action: string, row: EntryRow) {
+function act(kind: 'sign' | 'renew' | 'terminate', view: ContractView) {
   errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
+  const id = Number(view.row.id)
+  const result =
+    kind === 'sign'
+      ? signContract(id)
+      : kind === 'renew'
+        ? submitRenewal(id, store.operator)
+        : terminateContract(id)
   if (!result.ok) {
     errorMessage.value = result.message
-    return
   }
   reload()
 }
 
 function reload() {
   errorMessage.value = ''
-  try {
-    const payload = listEntries(meta.key, filters.value)
-    rows.value = payload.items
-    total.value = payload.total
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '运维合同列表读取失败'
-  }
+  all.value = listContractViews()
 }
 
 onMounted(reload)
